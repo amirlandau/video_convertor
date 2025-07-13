@@ -6,7 +6,7 @@ on:
       input_video:
         description: 'Path to the input video file (e.g., videos/my_video.mp4)'
         required: true
-        default: 'duos/after scale/TensorPix - hug.mp4'
+        default: 'video_convertor/hug.mp4'
       output_directory:
         description: 'Directory to save the converted video'
         required: true
