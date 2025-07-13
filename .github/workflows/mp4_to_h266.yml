@@ -30,21 +30,35 @@ on:
 
 jobs:
   convert-video:
-    runs-on: ubuntu-latest # IMPORTANT: See note below about the runner environment
-
-    # IMPORTANT NOTE:
-    # The standard 'ubuntu-latest' runner does NOT include FFmpeg with libvvenc.
-    # To run this successfully, you have two main options:
-    # 1. Self-Hosted Runner: Set up your own runner on a machine where you have
-    #    compiled and installed FFmpeg with libvvenc enabled.
-    # 2. Custom Docker Container: Modify this workflow to run inside a Docker
-    #    container that has the required FFmpeg build.
-    #    Example: `container: jrottenberg/ffmpeg:4.4-vvc` (This is an example, you might need to find or build a suitable image).
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         # This step downloads your repository code, making the video file available.
+
+      - name: Set up FFmpeg with libvvenc
+        run: |
+          # The standard runner doesn't have FFmpeg with libvvenc, so we download a static build.
+          # These builds are from the trusted BtbN/FFmpeg-Builds repository.
+          echo "Downloading a static build of FFmpeg..."
+          wget https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2023-11-28-12-54/ffmpeg-n6.1-1-g9a8b1752f2-linux64-gpl-6.1.zip -O ffmpeg.zip
+          
+          echo "Extracting FFmpeg..."
+          unzip ffmpeg.zip
+          
+          # Add the extracted FFmpeg bin directory to the GitHub Actions path.
+          # This makes the `ffmpeg` command available to subsequent steps.
+          FFMPEG_PATH=$(find . -type f -name ffmpeg | head -n 1)
+          FFMPEG_DIR=$(dirname "$FFMPEG_PATH")
+          echo "Adding $FFMPEG_DIR to GITHUB_PATH"
+          echo "$FFMPEG_DIR" >> $GITHUB_PATH
+          
+          # Verify the installation and check for libvvenc
+          echo "Verifying FFmpeg version and encoders..."
+          ffmpeg -version
+          ffmpeg -encoders | grep libvvenc
+        # This step ensures the required video converter is available for the job.
 
       - name: Create Output Directory
         run: mkdir -p ${{ github.event.inputs.output_directory }}
@@ -70,7 +84,7 @@ jobs:
             -vf "scale=480:-2" \
             -threads $(nproc) \
             "${OUTPUT_PATH}"
-        # This is the core conversion step. It will fail if FFmpeg with libvvenc is not installed on the runner.
+        # This is the core conversion step.
 
       - name: Upload Converted Video as Artifact
         uses: actions/upload-artifact@v4
@@ -78,3 +92,5 @@ jobs:
           name: converted-video-${{ github.run_id }}
           path: ${{ github.event.inputs.output_directory }}
           retention-days: 7
+        # This step uploads the contents of the output directory as a downloadable artifact.
+        # The artifact will be available on the summary page of the workflow run for 7 days.
