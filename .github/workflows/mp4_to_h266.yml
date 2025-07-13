@@ -1,0 +1,80 @@
+# .github/workflows/video-conversion.yml
+
+name: Convert Video to H.266/VVC
+
+# This workflow can be triggered manually from the Actions tab in your repository.
+on:
+  workflow_dispatch:
+    inputs:
+      input_video:
+        description: 'Path to the input video file (e.g., videos/my_video.mp4)'
+        required: true
+        default: 'duos/after scale/TensorPix - hug.mp4'
+      output_directory:
+        description: 'Directory to save the converted video'
+        required: true
+        default: 'converted_videos'
+      quality:
+        description: 'Quality parameter (qp)'
+        required: true
+        default: '37'
+      bitrate:
+        description: 'Target bitrate (e.g., 500k, 1M)'
+        required: true
+        default: '500k'
+      preset:
+        description: 'libvvenc encoding preset'
+        required: true
+        default: 'slower'
+
+
+jobs:
+  convert-video:
+    runs-on: ubuntu-latest # IMPORTANT: See note below about the runner environment
+
+    # IMPORTANT NOTE:
+    # The standard 'ubuntu-latest' runner does NOT include FFmpeg with libvvenc.
+    # To run this successfully, you have two main options:
+    # 1. Self-Hosted Runner: Set up your own runner on a machine where you have
+    #    compiled and installed FFmpeg with libvvenc enabled.
+    # 2. Custom Docker Container: Modify this workflow to run inside a Docker
+    #    container that has the required FFmpeg build.
+    #    Example: `container: jrottenberg/ffmpeg:4.4-vvc` (This is an example, you might need to find or build a suitable image).
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        # This step downloads your repository code, making the video file available.
+
+      - name: Create Output Directory
+        run: mkdir -p ${{ github.event.inputs.output_directory }}
+        # Creates the folder to store the converted video file.
+
+      - name: Convert Video using FFmpeg
+        run: |
+          # Construct the output path and filename
+          INPUT_FILENAME=$(basename "${{ github.event.inputs.input_video }}")
+          OUTPUT_FILENAME="${INPUT_FILENAME%.*}_h266.mp4"
+          OUTPUT_PATH="${{ github.event.inputs.output_directory }}/${OUTPUT_FILENAME}"
+
+          echo "Input video: ${{ github.event.inputs.input_video }}"
+          echo "Output path: ${OUTPUT_PATH}"
+
+          # Run the FFmpeg command with parameters from the workflow inputs
+          ffmpeg -i "${{ github.event.inputs.input_video }}" \
+            -c:v libvvenc \
+            -preset "${{ github.event.inputs.preset }}" \
+            -qp "${{ github.event.inputs.quality }}" \
+            -b:v "${{ github.event.inputs.bitrate }}" \
+            -an \
+            -vf "scale=480:-2" \
+            -threads $(nproc) \
+            "${OUTPUT_PATH}"
+        # This is the core conversion step. It will fail if FFmpeg with libvvenc is not installed on the runner.
+
+      - name: Upload Converted Video as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-video-${{ github.run_id }}
+          path: ${{ github.event.inputs.output_directory }}
+          retention-days: 7
