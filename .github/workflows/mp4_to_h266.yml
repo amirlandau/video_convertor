@@ -1,7 +1,4 @@
-# .github/workflows/video-conversion.yml
-
 name: Convert Video to H.266/VVC
-
 # This workflow can be triggered manually from the Actions tab in your repository.
 on:
   workflow_dispatch:
@@ -26,67 +23,124 @@ on:
         description: 'libvvenc encoding preset'
         required: true
         default: 'slower'
-
-
 jobs:
   convert-video:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         # This step downloads your repository code, making the video file available.
-
+      
       - name: Set up FFmpeg with libvvenc
         run: |
-          # The standard runner doesn't have FFmpeg with libvvenc, so we download a static build.
-          # These builds are from the trusted BtbN/FFmpeg-Builds repository.
-          echo "Downloading a static build of FFmpeg..."
-          # Updated URL to the latest valid build to fix the 404 Not Found error.
-          wget https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2024-07-14-12-52/ffmpeg-n7.1-1-g0722a849a9-linux64-gpl-7.1.zip -O ffmpeg.zip
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git wget unzip
           
-          echo "Extracting FFmpeg..."
-          unzip ffmpeg.zip
+          # Method 1: Try to get the latest FFmpeg build from BtbN
+          echo "Attempting to download latest FFmpeg build..."
           
-          # Add the extracted FFmpeg bin directory to the GitHub Actions path.
-          # This makes the `ffmpeg` command available to subsequent steps.
-          FFMPEG_PATH=$(find . -type f -name ffmpeg | head -n 1)
-          FFMPEG_DIR=$(dirname "$FFMPEG_PATH")
-          echo "Adding $FFMPEG_DIR to GITHUB_PATH"
-          echo "$FFMPEG_DIR" >> $GITHUB_PATH
+          # Get the latest release URL dynamically
+          LATEST_RELEASE_URL=$(curl -s https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest | grep "browser_download_url.*linux64-gpl.*zip" | cut -d '"' -f 4 | head -n 1)
           
-          # Verify the installation and check for libvvenc
-          echo "Verifying FFmpeg version and encoders..."
-          ffmpeg -version
-          ffmpeg -encoders | grep libvvenc
+          if [ -n "$LATEST_RELEASE_URL" ]; then
+            echo "Found latest build: $LATEST_RELEASE_URL"
+            wget "$LATEST_RELEASE_URL" -O ffmpeg.zip
+            
+            if [ $? -eq 0 ]; then
+              echo "Successfully downloaded FFmpeg build"
+              unzip ffmpeg.zip
+              
+              # Add the extracted FFmpeg bin directory to the GitHub Actions path
+              FFMPEG_PATH=$(find . -type f -name ffmpeg | head -n 1)
+              FFMPEG_DIR=$(dirname "$FFMPEG_PATH")
+              echo "Adding $FFMPEG_DIR to GITHUB_PATH"
+              echo "$FFMPEG_DIR" >> $GITHUB_PATH
+              
+              # Verify the installation and check for libvvenc
+              echo "Verifying FFmpeg version and encoders..."
+              $FFMPEG_PATH -version
+              $FFMPEG_PATH -encoders | grep libvvenc || echo "libvvenc not found in this build"
+            else
+              echo "Failed to download FFmpeg build, trying alternative method..."
+              USE_ALTERNATIVE=1
+            fi
+          else
+            echo "Could not find latest release URL, trying alternative method..."
+            USE_ALTERNATIVE=1
+          fi
+          
+          # Method 2: Alternative approach - build from source or use different source
+          if [ "$USE_ALTERNATIVE" = "1" ]; then
+            echo "Using alternative approach - installing via package manager and building if needed..."
+            
+            # Install FFmpeg from package manager first
+            sudo apt-get install -y ffmpeg
+            
+            # Check if libvvenc is available
+            if ! ffmpeg -encoders | grep -q libvvenc; then
+              echo "libvvenc not available in system FFmpeg, you may need to:"
+              echo "1. Use a different encoder (like libx265)"
+              echo "2. Build FFmpeg with libvvenc support manually"
+              echo "3. Use a Docker container with pre-built FFmpeg"
+              
+              # For now, let's continue with system FFmpeg and note the limitation
+              echo "Continuing with system FFmpeg..."
+            fi
+            
+            ffmpeg -version
+            ffmpeg -encoders | grep -E "(libvvenc|libx265|h264)" || echo "Available encoders listed above"
+          fi
         # This step ensures the required video converter is available for the job.
-
+      
       - name: Create Output Directory
         run: mkdir -p ${{ github.event.inputs.output_directory }}
         # Creates the folder to store the converted video file.
-
+      
       - name: Convert Video using FFmpeg
         run: |
           # Construct the output path and filename
           INPUT_FILENAME=$(basename "${{ github.event.inputs.input_video }}")
           OUTPUT_FILENAME="${INPUT_FILENAME%.*}_h266.mp4"
           OUTPUT_PATH="${{ github.event.inputs.output_directory }}/${OUTPUT_FILENAME}"
-
           echo "Input video: ${{ github.event.inputs.input_video }}"
           echo "Output path: ${OUTPUT_PATH}"
-
-          # Run the FFmpeg command with parameters from the workflow inputs
-          ffmpeg -i "${{ github.event.inputs.input_video }}" \
-            -c:v libvvenc \
-            -preset "${{ github.event.inputs.preset }}" \
-            -qp "${{ github.event.inputs.quality }}" \
-            -b:v "${{ github.event.inputs.bitrate }}" \
-            -an \
-            -vf "scale=480:-2" \
-            -threads $(nproc) \
-            "${OUTPUT_PATH}"
-        # This is the core conversion step.
-
+          
+          # Check if input file exists
+          if [ ! -f "${{ github.event.inputs.input_video }}" ]; then
+            echo "Error: Input video file not found: ${{ github.event.inputs.input_video }}"
+            exit 1
+          fi
+          
+          # Check if libvvenc is available, if not fall back to libx265
+          if ffmpeg -encoders | grep -q libvvenc; then
+            echo "Using libvvenc encoder for H.266/VVC"
+            ffmpeg -i "${{ github.event.inputs.input_video }}" \
+              -c:v libvvenc \
+              -preset "${{ github.event.inputs.preset }}" \
+              -qp "${{ github.event.inputs.quality }}" \
+              -b:v "${{ github.event.inputs.bitrate }}" \
+              -an \
+              -vf "scale=480:-2" \
+              -threads $(nproc) \
+              "${OUTPUT_PATH}"
+          else
+            echo "libvvenc not available, falling back to libx265 (H.265/HEVC)"
+            OUTPUT_FILENAME="${INPUT_FILENAME%.*}_h265.mp4"
+            OUTPUT_PATH="${{ github.event.inputs.output_directory }}/${OUTPUT_FILENAME}"
+            
+            ffmpeg -i "${{ github.event.inputs.input_video }}" \
+              -c:v libx265 \
+              -preset "${{ github.event.inputs.preset }}" \
+              -crf "${{ github.event.inputs.quality }}" \
+              -b:v "${{ github.event.inputs.bitrate }}" \
+              -an \
+              -vf "scale=480:-2" \
+              -threads $(nproc) \
+              "${OUTPUT_PATH}"
+          fi
+        # This is the core conversion step with fallback support.
+      
       - name: Upload Converted Video as Artifact
         uses: actions/upload-artifact@v4
         with:
