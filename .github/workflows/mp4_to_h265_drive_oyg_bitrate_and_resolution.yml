@@ -302,10 +302,6 @@ jobs:
           ARGS=()
           ARGS+=("${{ steps.download.outputs.downloaded_files }}")
           ARGS+=("--output-dir" "${{ github.event.inputs.output_directory }}")
-          # Hardcode codec and preset here as they are no longer inputs
-          # The Python script's main() function will now set these internally
-          # ARGS+=("--codec" "libx265") # No longer needed as Python script sets it
-          # ARGS+=("--preset" "veryslow") # No longer needed as Python script sets it
           ARGS+=("--quality-mode" "${{ github.event.inputs.quality_mode }}")
           ARGS+=("--crf" "${{ github.event.inputs.crf_value }}")
 
@@ -328,11 +324,16 @@ jobs:
           
           ./video_converter.py "${ARGS[@]}"
 
-      - name: Display conversion results and Upload Artifact
+      # Separate step for displaying results
+      - name: Display conversion results
         if: always()
         run: |
           echo "📊 Conversion Results:"
           ls -laR ${{ github.event.inputs.output_directory }}
+
+      # Separate step for uploading artifact
+      - name: Upload Converted Videos Artifact
+        if: always() # Ensure artifact is uploaded even if previous steps fail
         uses: actions/upload-artifact@v4
         with:
           name: converted-videos-${{ github.run_id }}
