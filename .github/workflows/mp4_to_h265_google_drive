@@ -1,0 +1,532 @@
+name: Python Video Converter (H.265/H.266)
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_files:
+        description: 'Input video files (comma-separated paths or glob patterns)'
+        required: true
+        default: 'downloaded_video.mp4' # Changed to the name of the downloaded file
+      output_directory:
+        description: 'Directory to save converted videos'
+        required: true
+        default: 'converted_videos'
+      codec:
+        description: 'Video codec to use'
+        required: true
+        default: 'libx265'
+        type: choice
+        options:
+          - libx265
+          - libx264
+          - libvvenc
+      bitrate:
+        description: 'Target bitrate (e.g., 500k, 1M, 2M)'
+        required: true
+        default: '500k'
+      preset:
+        description: 'Encoding preset (affects speed vs quality)'
+        required: true
+        default: 'veryslow'
+        type: choice
+        options:
+          - ultrafast
+          - superfast
+          - veryfast
+          - faster
+          - fast
+          - medium
+          - slow
+          - slower
+          - veryslow
+      resolution:
+        description: 'Output resolution (e.g., 480, 720, 1080, or original)'
+        required: true
+        default: '480'
+      keep_audio:
+        description: 'Keep audio in output'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      use_two_pass:
+        description: 'Use two-pass encoding for better bitrate control'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      quality_mode:
+        description: 'Quality mode (bitrate-based or quality-based)'
+        required: true
+        default: 'bitrate'
+        type: choice
+        options:
+          - bitrate
+          - quality
+      crf_value:
+        description: 'CRF value for quality-based encoding (18-28 recommended)'
+        required: false
+        default: '23'
+
+jobs:
+  convert-videos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies and gdown
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg build-essential cmake git wget bc
+          pip install --upgrade pip
+          pip install gdown
+
+          # Try to get FFmpeg with better codec support
+          echo "🔍 Checking for advanced codecs..."
+          ffmpeg -encoders | grep -E "(libx265|libx264|libvvenc)" || echo "Standard encoders available"
+
+      - name: Download video from Google Drive
+        run: |
+          echo "⬇️ Downloading video from Google Drive..."
+          gdown '1nCShWwoVs-3a_G4852_jJgC979b1pd_W' -O downloaded_video.mp4
+          if [ ! -f downloaded_video.mp4 ]; then
+            echo "❌ Failed to download video."
+            exit 1
+          fi
+          echo "✅ Video downloaded successfully."
+          ls -lh downloaded_video.mp4
+
+      - name: Create Python conversion script
+        run: |
+          cat > video_converter.py << 'EOF'
+          #!/usr/bin/env python3
+
+          import os
+          import sys
+          import subprocess
+          import argparse
+          import glob
+          import json
+          from pathlib import Path
+          from datetime import datetime
+
+          class VideoConverter:
+              def __init__(self):
+                  self.supported_formats = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.m4v']
+                  self.conversion_stats = []
+
+              def check_ffmpeg(self):
+                  """Check if FFmpeg is installed and get available encoders"""
+                  try:
+                      result = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, text=True)
+                      print("✅ FFmpeg is available")
+
+                      # Check available encoders
+                      encoders_result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True)
+                      available_encoders = {
+                          'libx264': 'libx264' in encoders_result.stdout,
+                          'libx265': 'libx265' in encoders_result.stdout,
+                          'libvvenc': 'libvvenc' in encoders_result.stdout
+                      }
+
+                      print("📋 Available encoders:")
+                      for encoder, available in available_encoders.items():
+                          status = "✅" if available else "❌"
+                          print(f"   {status} {encoder}")
+
+                      return True, available_encoders
+                  except (subprocess.CalledProcessError, FileNotFoundError):
+                      return False, {}
+
+              def get_file_size(self, filepath):
+                  """Get file size in human readable format"""
+                  size = os.path.getsize(filepath)
+                  for unit in ['B', 'KB', 'MB', 'GB']:
+                      if size < 1024.0:
+                          return f"{size:.1f} {unit}"
+                      size /= 1024.0
+                  return f"{size:.1f} TB"
+
+              def get_video_info(self, filepath):
+                  """Get video information using ffprobe"""
+                  try:
+                      cmd = [
+                          'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                          '-show_format', '-show_streams', filepath
+                      ]
+                      result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                      return json.loads(result.stdout)
+                  except:
+                      return None
+
+              def expand_file_patterns(self, patterns):
+                  """Expand file patterns and filter valid video files"""
+                  files = []
+                  for pattern in patterns:
+                      if ',' in pattern:
+                          # Handle comma-separated patterns
+                          subpatterns = [p.strip() for p in pattern.split(',')]
+                          for subpattern in subpatterns:
+                              files.extend(glob.glob(subpattern))
+                      else:
+                          files.extend(glob.glob(pattern))
+
+                  # Filter and validate
+                  valid_files = []
+                  for file in files:
+                      if os.path.exists(file) and Path(file).suffix.lower() in self.supported_formats:
+                          valid_files.append(file)
+                      elif os.path.exists(file):
+                          print(f"⚠️  Skipping unsupported format: {file}")
+
+                  return list(set(valid_files))  # Remove duplicates
+
+              def build_ffmpeg_command(self, input_file, output_file, config, pass_num=None):
+                  """Build FFmpeg command based on configuration"""
+                  cmd = ['ffmpeg', '-i', input_file]
+
+                  # Video codec
+                  cmd.extend(['-c:v', config['codec']])
+
+                  # Preset
+                  cmd.extend(['-preset', config['preset']])
+
+                  # Quality/Bitrate settings
+                  if config['quality_mode'] == 'bitrate':
+                      cmd.extend(['-b:v', config['bitrate']])
+                      if config['use_two_pass']:
+                          # For two-pass, add maxrate and bufsize
+                          maxrate = config['bitrate']
+                          bufsize = str(int(config['bitrate'][:-1]) * 2) + config['bitrate'][-1]
+                          cmd.extend(['-maxrate', maxrate, '-bufsize', bufsize])
+                  else:
+                      cmd.extend(['-crf', config['crf_value']])
+
+                  # Resolution
+                  if config['resolution'] != 'original':
+                      cmd.extend(['-vf', f'scale={config["resolution"]}:-2'])
+
+                  # Audio
+                  if config['keep_audio']:
+                      cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+                  else:
+                      cmd.extend(['-an'])
+
+                  # Threading
+                  cmd.extend(['-threads', str(os.cpu_count())])
+
+                  # Two-pass specific settings
+                  if pass_num:
+                      cmd.extend(['-pass', str(pass_num)])
+                      if pass_num == 1:
+                          cmd.extend(['-f', 'null'])
+                          cmd.extend(['-y', '/dev/null'])
+                      else:
+                          cmd.extend(['-movflags', '+faststart'])
+                          cmd.extend(['-y', output_file])
+                  else:
+                      # Single pass
+                      cmd.extend(['-movflags', '+faststart'])
+                      cmd.extend(['-y', output_file])
+
+                  return cmd
+
+              def convert_video(self, input_file, output_dir, config):
+                  """Convert a single video file"""
+                  input_path = Path(input_file)
+
+                  # Generate output filename
+                  codec_suffix = {
+                      'libx264': 'h264',
+                      'libx265': 'h265',
+                      'libvvenc': 'h266'
+                  }.get(config['codec'], 'converted')
+
+                  output_filename = f"{input_path.stem}_{codec_suffix}_{config['bitrate']}{input_path.suffix}"
+                  output_file = os.path.join(output_dir, output_filename)
+
+                  print(f"🎬 Converting: {input_file}")
+                  print(f"📤 Output: {output_file}")
+
+                  # Get input video info
+                  video_info = self.get_video_info(input_file)
+                  if video_info:
+                      format_info = video_info.get('format', {})
+                      video_stream = next((s for s in video_info['streams'] if s['codec_type'] == 'video'), {})
+                      print(f"📊 Input: {video_stream.get('codec_name', 'unknown')} {video_stream.get('width', '?')}x{video_stream.get('height', '?')}")
+
+                  start_time = datetime.now()
+
+                  try:
+                      if config['use_two_pass'] and config['quality_mode'] == 'bitrate':
+                          # Two-pass encoding
+                          print("🔄 Running two-pass encoding...")
+
+                          # First pass
+                          print("   Pass 1/2: Analysis...")
+                          pass1_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=1)
+                          print(f"   Command: {' '.join(pass1_cmd)}")
+                          result = subprocess.run(pass1_cmd, capture_output=True, text=True)
+                          if result.returncode != 0:
+                              print(f"   Error output: {result.stderr}")
+                              raise subprocess.CalledProcessError(result.returncode, pass1_cmd)
+
+                          # Second pass
+                          print("   Pass 2/2: Encoding...")
+                          pass2_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=2)
+                          print(f"   Command: {' '.join(pass2_cmd)}")
+                          result = subprocess.run(pass2_cmd, capture_output=True, text=To use the file from your Google Drive, you'll need to modify the GitHub Actions workflow to download it before the conversion step. The script you provided runs in a temporary, isolated environment and can't directly access your Google Drive.
+
+Here is the updated script that will download the video from the link you shared and then run the conversion.
+
+### Updated GitHub Actions Workflow
+
+I've added a step to install the `gdown` tool, which is used for downloading files from Google Drive, and then used it to fetch your video.
+
+```yaml
+name: Python Video Converter (H.265/H.266)
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_files:
+        description: 'Input video files (comma-separated paths or glob patterns)'
+        required: true
+        default: 'downloaded_video.mp4' # Changed to the name of the downloaded file
+      output_directory:
+        description: 'Directory to save converted videos'
+        required: true
+        default: 'converted_videos'
+      codec:
+        description: 'Video codec to use'
+        required: true
+        default: 'libx265'
+        type: choice
+        options:
+          - libx265
+          - libx264
+          - libvvenc
+      bitrate:
+        description: 'Target bitrate (e.g., 500k, 1M, 2M)'
+        required: true
+        default: '500k'
+      preset:
+        description: 'Encoding preset (affects speed vs quality)'
+        required: true
+        default: 'veryslow'
+        type: choice
+        options:
+          - ultrafast
+          - superfast
+          - veryfast
+          - faster
+          - fast
+          - medium
+          - slow
+          - slower
+          - veryslow
+      resolution:
+        description: 'Output resolution (e.g., 480, 720, 1080, or original)'
+        required: true
+        default: '480'
+      keep_audio:
+        description: 'Keep audio in output'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      use_two_pass:
+        description: 'Use two-pass encoding for better bitrate control'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      quality_mode:
+        description: 'Quality mode (bitrate-based or quality-based)'
+        required: true
+        default: 'bitrate'
+        type: choice
+        options:
+          - bitrate
+          - quality
+      crf_value:
+        description: 'CRF value for quality-based encoding (18-28 recommended)'
+        required: false
+        default: '23'
+
+jobs:
+  convert-videos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies and gdown
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg build-essential cmake git wget bc
+          pip install --upgrade pip
+          pip install gdown
+
+          # Try to get FFmpeg with better codec support
+          echo "🔍 Checking for advanced codecs..."
+          ffmpeg -encoders | grep -E "(libx265|libx264|libvvenc)" || echo "Standard encoders available"
+
+      - name: Download video from Google Drive
+        run: |
+          echo "⬇️ Downloading video from Google Drive..."
+          gdown '1nCShWwoVs-3a_G4852_jJgC979b1pd_W' -O downloaded_video.mp4
+          if [ ! -f downloaded_video.mp4 ]; then
+            echo "❌ Failed to download video."
+            exit 1
+          fi
+          echo "✅ Video downloaded successfully."
+          ls -lh downloaded_video.mp4
+
+      - name: Create Python conversion script
+        run: |
+          cat > video_converter.py << 'EOF'
+          #!/usr/bin/env python3
+
+          import os
+          import sys
+          import subprocess
+          import argparse
+          import glob
+          import json
+          from pathlib import Path
+          from datetime import datetime
+
+          class VideoConverter:
+              def __init__(self):
+                  self.supported_formats = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.m4v']
+                  self.conversion_stats = []
+
+              def check_ffmpeg(self):
+                  """Check if FFmpeg is installed and get available encoders"""
+                  try:
+                      result = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, text=True)
+                      print("✅ FFmpeg is available")
+
+                      # Check available encoders
+                      encoders_result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True)
+                      available_encoders = {
+                          'libx264': 'libx264' in encoders_result.stdout,
+                          'libx265': 'libx265' in encoders_result.stdout,
+                          'libvvenc': 'libvvenc' in encoders_result.stdout
+                      }
+
+                      print("📋 Available encoders:")
+                      for encoder, available in available_encoders.items():
+                          status = "✅" if available else "❌"
+                          print(f"   {status} {encoder}")
+
+                      return True, available_encoders
+                  except (subprocess.CalledProcessError, FileNotFoundError):
+                      return False, {}
+
+              def get_file_size(self, filepath):
+                  """Get file size in human readable format"""
+                  size = os.path.getsize(filepath)
+                  for unit in ['B', 'KB', 'MB', 'GB']:
+                      if size < 1024.0:
+                          return f"{size:.1f} {unit}"
+                      size /= 1024.0
+                  return f"{size:.1f} TB"
+
+              def get_video_info(self, filepath):
+                  """Get video information using ffprobe"""
+                  try:
+                      cmd = [
+                          'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                          '-show_format', '-show_streams', filepath
+                      ]
+                      result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                      return json.loads(result.stdout)
+                  except:
+                      return None
+
+              def expand_file_patterns(self, patterns):
+                  """Expand file patterns and filter valid video files"""
+                  files = []
+                  for pattern in patterns:
+                      if ',' in pattern:
+                          # Handle comma-separated patterns
+                          subpatterns = [p.strip() for p in pattern.split(',')]
+                          for subpattern in subpatterns:
+                              files.extend(glob.glob(subpattern))
+                      else:
+                          files.extend(glob.glob(pattern))
+
+                  # Filter and validate
+                  valid_files = []
+                  for file in files:
+                      if os.path.exists(file) and Path(file).suffix.lower() in self.supported_formats:
+                          valid_files.append(file)
+                      elif os.path.exists(file):
+                          print(f"⚠️  Skipping unsupported format: {file}")
+
+                  return list(set(valid_files))  # Remove duplicates
+
+              def build_ffmpeg_command(self, input_file, output_file, config, pass_num=None):
+                  """Build FFmpeg command based on configuration"""
+                  cmd = ['ffmpeg', '-i', input_file]
+
+                  # Video codec
+                  cmd.extend(['-c:v', config['codec']])
+
+                  # Preset
+                  cmd.extend(['-preset', config['preset']])
+
+                  # Quality/Bitrate settings
+                  if config['quality_mode'] == 'bitrate':
+                      cmd.extend(['-b:v', config['bitrate']])
+                      if config['use_two_pass']:
+                          # For two-pass, add maxrate and bufsize
+                          maxrate = config['bitrate']
+                          bufsize = str(int(config['bitrate'][:-1]) * 2) + config['bitrate'][-1]
+                          cmd.extend(['-maxrate', maxrate, '-bufsize', bufsize])
+                  else:
+                      cmd.extend(['-crf', config['crf_value']])
+
+                  # Resolution
+                  if config['resolution'] != 'original':
+                      cmd.extend(['-vf', f'scale={config["resolution"]}:-2'])
+
+                  # Audio
+                  if config['keep_audio']:
+                      cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+                  else:
+                      cmd.extend(['-an'])
+
+                  # Threading
+                  cmd.extend(['-threads', str(os.cpu_count())])
+
+                  # Two-pass specific settings
+                  if pass_num:
+                      cmd.extend(['-pass', str(pass_num)])
+                      if pass_num == 1:
+                          cmd.extend(['-f', 'null'])
+                          cmd.extend(['-y', '/dev/null'])
+                      else:
+                          cmd.extend(['-movflags', '+faststart'])
+                          cmd.extend(['-y',
