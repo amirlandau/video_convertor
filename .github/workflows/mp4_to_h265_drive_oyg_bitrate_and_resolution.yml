@@ -134,7 +134,8 @@ jobs:
                   
                   if config['quality_mode'] == 'bitrate' and config['bitrate']:
                       cmd.extend(['-b:v', config['bitrate']])
-                      if config['use_two_pass']:
+                      # CORRECTED: Changed config['use_two_pass'] to config['two_pass']
+                      if config['two_pass']:
                           try:
                               rate = int(config['bitrate'][:-1])
                               unit = config['bitrate'][-1]
@@ -165,10 +166,9 @@ jobs:
                       cmd.extend(['-movflags', '+faststart', '-y', output_file])
                   
                   return cmd
-              
+                  
               def convert_video(self, input_file, output_dir, config):
                   input_path = Path(input_file)
-                  # Codec suffix is now fixed to h265 as the codec is fixed to libx265
                   codec_suffix = 'h265'
                   
                   res_suffix = f"_{config['resolution']}p" if config['resolution'] and config['resolution'] != 'original' else ""
@@ -180,7 +180,8 @@ jobs:
                   start_time = datetime.now()
                   
                   try:
-                      use_two_pass = config['use_two_pass'] and config['quality_mode'] == 'bitrate' and config['bitrate']
+                      # CORRECTED: Changed config['use_two_pass'] to config['two_pass']
+                      use_two_pass = config['two_pass'] and config['quality_mode'] == 'bitrate' and config['bitrate']
                       if use_two_pass:
                           print("🔄 Running two-pass encoding...")
                           pass1_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=1)
@@ -210,7 +211,7 @@ jobs:
                   except subprocess.CalledProcessError as e:
                       print(f"❌ Conversion failed: {e.stderr}")
                       return False
-              
+                      
               def generate_report(self, output_dir):
                   report_file = os.path.join(output_dir, 'conversion_report.json')
                   report = {
@@ -226,7 +227,6 @@ jobs:
               parser = argparse.ArgumentParser(description='Advanced Video Converter')
               parser.add_argument('input_files', help='Input files or patterns')
               parser.add_argument('--output-dir', required=True)
-              # Codec and preset are now hardcoded in the workflow and thus not exposed here as CLI args
               parser.add_argument('--bitrate', default=None, help='Omit to use original')
               parser.add_argument('--resolution', default='original', help="'original' or a height value")
               parser.add_argument('--keep-audio', action='store_true')
@@ -245,7 +245,6 @@ jobs:
               if not input_files:
                   sys.exit("❌ No valid input files found!")
               
-              # Hardcode codec and preset here for the script's internal config
               config = vars(args)
               config['codec'] = 'libx265' # Hardcoded
               config['preset'] = 'veryslow' # Hardcoded
