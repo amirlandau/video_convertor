@@ -6,7 +6,7 @@ on:
       input_files:
         description: 'Input video files (comma-separated paths or glob patterns)'
         required: true
-        default: 'video_convertor/hug.mp4'
+        default: 'hug.mp4'
       output_directory:
         description: 'Directory to save converted videos'
         required: true
@@ -183,7 +183,7 @@ jobs:
                   
                   return list(set(valid_files))  # Remove duplicates
               
-              def build_ffmpeg_command(self, input_file, output_file, config):
+              def build_ffmpeg_command(self, input_file, output_file, config, pass_num=None):
                   """Build FFmpeg command based on configuration"""
                   cmd = ['ffmpeg', '-i', input_file]
                   
@@ -197,7 +197,7 @@ jobs:
                   if config['quality_mode'] == 'bitrate':
                       cmd.extend(['-b:v', config['bitrate']])
                       if config['use_two_pass']:
-                          # For two-pass, we'll handle this separately
+                          # For two-pass, add maxrate and bufsize
                           maxrate = config['bitrate']
                           bufsize = str(int(config['bitrate'][:-1]) * 2) + config['bitrate'][-1]
                           cmd.extend(['-maxrate', maxrate, '-bufsize', bufsize])
@@ -214,12 +214,22 @@ jobs:
                   else:
                       cmd.extend(['-an'])
                   
-                  # Threading and optimization
+                  # Threading
                   cmd.extend(['-threads', str(os.cpu_count())])
-                  cmd.extend(['-movflags', '+faststart'])
                   
-                  # Output file
-                  cmd.extend(['-y', output_file])
+                  # Two-pass specific settings
+                  if pass_num:
+                      cmd.extend(['-pass', str(pass_num)])
+                      if pass_num == 1:
+                          cmd.extend(['-f', 'null'])
+                          cmd.extend(['-y', '/dev/null'])
+                      else:
+                          cmd.extend(['-movflags', '+faststart'])
+                          cmd.extend(['-y', output_file])
+                  else:
+                      # Single pass
+                      cmd.extend(['-movflags', '+faststart'])
+                      cmd.extend(['-y', output_file])
                   
                   return cmd
               
@@ -256,20 +266,30 @@ jobs:
                           
                           # First pass
                           print("   Pass 1/2: Analysis...")
-                          pass1_cmd = self.build_ffmpeg_command(input_file, '/dev/null', config)
-                          pass1_cmd.extend(['-pass', '1', '-f', 'null'])
-                          subprocess.run(pass1_cmd, check=True, capture_output=True)
+                          pass1_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=1)
+                          print(f"   Command: {' '.join(pass1_cmd)}")
+                          result = subprocess.run(pass1_cmd, capture_output=True, text=True)
+                          if result.returncode != 0:
+                              print(f"   Error output: {result.stderr}")
+                              raise subprocess.CalledProcessError(result.returncode, pass1_cmd)
                           
                           # Second pass
                           print("   Pass 2/2: Encoding...")
-                          pass2_cmd = self.build_ffmpeg_command(input_file, output_file, config)
-                          pass2_cmd.extend(['-pass', '2'])
-                          subprocess.run(pass2_cmd, check=True, capture_output=True)
+                          pass2_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=2)
+                          print(f"   Command: {' '.join(pass2_cmd)}")
+                          result = subprocess.run(pass2_cmd, capture_output=True, text=True)
+                          if result.returncode != 0:
+                              print(f"   Error output: {result.stderr}")
+                              raise subprocess.CalledProcessError(result.returncode, pass2_cmd)
                       else:
                           # Single-pass encoding
                           print("🔄 Running single-pass encoding...")
                           cmd = self.build_ffmpeg_command(input_file, output_file, config)
-                          subprocess.run(cmd, check=True, capture_output=True)
+                          print(f"   Command: {' '.join(cmd)}")
+                          result = subprocess.run(cmd, capture_output=True, text=True)
+                          if result.returncode != 0:
+                              print(f"   Error output: {result.stderr}")
+                              raise subprocess.CalledProcessError(result.returncode, cmd)
                       
                       # Calculate statistics
                       end_time = datetime.now()
