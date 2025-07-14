@@ -1,0 +1,359 @@
+name: Python Video Converter (H.265/H.266)
+
+on:
+  workflow_dispatch:
+    inputs:
+      google_drive_urls:
+        description: 'Google Drive share URLs (comma-separated)'
+        required: true
+        default: 'https://drive.google.com/file/d/1nCShWwoVs-3a_G4852_jJgC979b1pd_W/view?usp=sharing'
+      output_directory:
+        description: 'Directory to save converted videos'
+        required: true
+        default: 'converted_videos'
+      use_original_settings:
+        description: 'Use original bitrate and resolution'
+        required: true
+        type: boolean
+        default: true
+      bitrate:
+        description: 'Target bitrate (e.g., 500k, 1M, 2M). Used if use_original_settings is false.'
+        required: false
+        default: '1M'
+      resolution:
+        description: 'Output height (e.g., 480, 720, 1080). Used if use_original_settings is false.'
+        required: false
+        default: '720'
+      codec:
+        description: 'Video codec to use'
+        required: true
+        default: 'libx265'
+        type: choice
+        options:
+          - libx265
+          - libx264
+          - libvvenc
+      preset:
+        description: 'Encoding preset (affects speed vs quality)'
+        required: true
+        default: 'slow'
+        type: choice
+        options:
+          - ultrafast
+          - superfast
+          - veryfast
+          - faster
+          - fast
+          - medium
+          - slow
+          - slower
+          - veryslow
+      keep_audio:
+        description: 'Keep audio in output'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      use_two_pass:
+        description: 'Use two-pass encoding for better bitrate control'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      quality_mode:
+        description: 'Quality mode (bitrate-based or quality-based)'
+        required: true
+        default: 'bitrate'
+        type: choice
+        options:
+          - bitrate
+          - quality
+      crf_value:
+        description: 'CRF value for quality-based encoding (18-28 recommended)'
+        required: false
+        default: '23'
+
+jobs:
+  convert-videos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg build-essential cmake git wget bc jq
+          pip install --upgrade pip
+          pip install gdown
+          echo "🔍 Checking for advanced codecs..."
+          ffmpeg -encoders | grep -E "(libx265|libx264|libvvenc)" || echo "Standard encoders available"
+
+      - name: Create Python conversion script
+        run: |
+          cat > video_converter.py << 'EOF'
+          #!/usr/bin/env python3
+          
+          import os
+          import sys
+          import subprocess
+          import argparse
+          import glob
+          import json
+          from pathlib import Path
+          from datetime import datetime
+          
+          class VideoConverter:
+              def __init__(self):
+                  self.supported_formats = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.m4v']
+                  self.conversion_stats = []
+              
+              def check_ffmpeg(self):
+                  try:
+                      subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, text=True)
+                      print("✅ FFmpeg is available")
+                      return True
+                  except (subprocess.CalledProcessError, FileNotFoundError):
+                      return False
+              
+              def get_file_size(self, filepath):
+                  size = os.path.getsize(filepath)
+                  for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                      if size < 1024.0:
+                          return f"{size:.1f} {unit}"
+                      size /= 1024.0
+                  return f"{size:.1f} {unit}"
+              
+              def get_video_info(self, filepath):
+                  try:
+                      cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filepath]
+                      result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                      return json.loads(result.stdout)
+                  except:
+                      return None
+              
+              def expand_file_patterns(self, patterns):
+                  files = []
+                  for pattern in patterns:
+                      subpatterns = [p.strip() for p in pattern.split(',') if p.strip()]
+                      for subpattern in subpatterns:
+                          files.extend(glob.glob(subpattern))
+                  
+                  valid_files = [f for f in list(set(files)) if os.path.exists(f) and Path(f).suffix.lower() in self.supported_formats]
+                  return valid_files
+              
+              def build_ffmpeg_command(self, input_file, output_file, config, pass_num=None):
+                  cmd = ['ffmpeg', '-i', input_file]
+                  cmd.extend(['-c:v', config['codec']])
+                  cmd.extend(['-preset', config['preset']])
+                  
+                  if config['quality_mode'] == 'bitrate' and config['bitrate']:
+                      cmd.extend(['-b:v', config['bitrate']])
+                      if config['use_two_pass']:
+                          try:
+                              rate = int(config['bitrate'][:-1])
+                              unit = config['bitrate'][-1]
+                              bufsize = str(rate * 2) + unit
+                              cmd.extend(['-maxrate', config['bitrate'], '-bufsize', bufsize])
+                          except ValueError:
+                              print(f"⚠️ Could not parse bitrate '{config['bitrate']}' for two-pass.")
+                  elif config['quality_mode'] == 'quality':
+                      cmd.extend(['-crf', config['crf_value']])
+                  
+                  if config['resolution'] and config['resolution'] != 'original':
+                      cmd.extend(['-vf', f'scale=-2:{config["resolution"]}'])
+                  
+                  if config['keep_audio']:
+                      cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+                  else:
+                      cmd.extend(['-an'])
+                  
+                  cmd.extend(['-threads', str(os.cpu_count())])
+                  
+                  if pass_num:
+                      cmd.extend(['-pass', str(pass_num)])
+                      if pass_num == 1:
+                          cmd.extend(['-f', 'null', '-y', '/dev/null'])
+                      else:
+                          cmd.extend(['-movflags', '+faststart', '-y', output_file])
+                  else:
+                      cmd.extend(['-movflags', '+faststart', '-y', output_file])
+                  
+                  return cmd
+              
+              def convert_video(self, input_file, output_dir, config):
+                  input_path = Path(input_file)
+                  codec_suffix = {'libx264': 'h264', 'libx265': 'h265', 'libvvenc': 'h266'}.get(config['codec'], 'converted')
+                  
+                  res_suffix = f"_{config['resolution']}p" if config['resolution'] and config['resolution'] != 'original' else ""
+                  output_filename = f"{input_path.stem}_{codec_suffix}{res_suffix}{input_path.suffix}"
+                  output_file = os.path.join(output_dir, output_filename)
+                  
+                  print(f"🎬 Converting: {input_file} -> {output_file}")
+                  
+                  start_time = datetime.now()
+                  
+                  try:
+                      use_two_pass = config['use_two_pass'] and config['quality_mode'] == 'bitrate' and config['bitrate']
+                      if use_two_pass:
+                          print("🔄 Running two-pass encoding...")
+                          pass1_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=1)
+                          subprocess.run(pass1_cmd, capture_output=True, text=True, check=True)
+                          pass2_cmd = self.build_ffmpeg_command(input_file, output_file, config, pass_num=2)
+                          subprocess.run(pass2_cmd, capture_output=True, text=True, check=True)
+                      else:
+                          print("🔄 Running single-pass encoding...")
+                          cmd = self.build_ffmpeg_command(input_file, output_file, config)
+                          subprocess.run(cmd, capture_output=True, text=True, check=True)
+                      
+                      end_time = datetime.now()
+                      if os.path.exists(output_file):
+                          original_size = os.path.getsize(input_file)
+                          converted_size = os.path.getsize(output_file)
+                          stats = {
+                              'input_file': input_file, 'output_file': output_file,
+                              'original_size': original_size, 'converted_size': converted_size,
+                              'compression_ratio': (1 - converted_size / original_size) * 100 if original_size > 0 else 0,
+                              'conversion_time': (end_time - start_time).total_seconds(), 'success': True
+                          }
+                          print(f"✅ Conversion completed in {stats['conversion_time']:.1f}s. Compression: {stats['compression_ratio']:.1f}%")
+                          self.conversion_stats.append(stats)
+                          return True
+                      else:
+                          return False
+                  except subprocess.CalledProcessError as e:
+                      print(f"❌ Conversion failed: {e.stderr}")
+                      return False
+              
+              def generate_report(self, output_dir):
+                  report_file = os.path.join(output_dir, 'conversion_report.json')
+                  report = {
+                      'timestamp': datetime.now().isoformat(),
+                      'total_files': len(self.conversion_stats),
+                      'successful_conversions': len([s for s in self.conversion_stats if s['success']]),
+                      'conversions': self.conversion_stats
+                  }
+                  with open(report_file, 'w') as f:
+                      json.dump(report, f, indent=2)
+          
+          def main():
+              parser = argparse.ArgumentParser(description='Advanced Video Converter')
+              parser.add_argument('input_files', help='Input files or patterns')
+              parser.add_argument('--output-dir', required=True)
+              parser.add_argument('--codec', default='libx265')
+              parser.add_argument('--bitrate', default=None, help='Omit to use original')
+              parser.add_argument('--preset', default='slow')
+              parser.add_argument('--resolution', default='original', help="'original' or a height value")
+              parser.add_argument('--keep-audio', action='store_true')
+              parser.add_argument('--two-pass', action='store_true')
+              parser.add_argument('--quality-mode', default='bitrate', choices=['bitrate', 'quality'])
+              parser.add_argument('--crf', default='23')
+              args = parser.parse_args()
+              
+              converter = VideoConverter()
+              if not converter.check_ffmpeg():
+                  sys.exit("❌ FFmpeg is not available!")
+              
+              os.makedirs(args.output_dir, exist_ok=True)
+              input_files = converter.expand_file_patterns([args.input_files])
+              
+              if not input_files:
+                  sys.exit("❌ No valid input files found!")
+              
+              config = vars(args)
+              
+              for i, f in enumerate(input_files, 1):
+                  print(f"\n--- Processing {i}/{len(input_files)}: {os.path.basename(f)} ---")
+                  converter.convert_video(f, args.output_dir, config)
+              
+              if converter.conversion_stats:
+                  converter.generate_report(args.output_dir)
+              
+              if len(converter.conversion_stats) != len(input_files):
+                  sys.exit(1)
+          
+          if __name__ == "__main__":
+              main()
+          EOF
+          chmod +x video_converter.py
+
+      - name: Download files from Google Drive
+        id: download
+        run: |
+          echo "📥 Downloading files from Google Drive..."
+          mkdir -p downloads
+          extract_file_id() {
+            [[ $1 =~ /file/d/([a-zA-Z0-9_-]+) ]] && echo "${BASH_REMATCH[1]}"
+          }
+          IFS=',' read -ra URLS <<< "${{ github.event.inputs.google_drive_urls }}"
+          DOWNLOADED_FILES=()
+          for i in "${!URLS[@]}"; do
+            url=$(echo "${URLS[i]}" | xargs)
+            file_id=$(extract_file_id "$url")
+            if [ -n "$file_id" ]; then
+              output_path="downloads/video_$(date +%s)_$((i+1)).mp4"
+              echo "🔄 Downloading file ID: $file_id to $output_path"
+              if gdown --id "$file_id" -O "$output_path" && [ -s "$output_path" ]; then
+                echo "✅ Downloaded: $output_path"
+                DOWNLOADED_FILES+=("$output_path")
+              else
+                echo "❌ Download failed for URL: $url"
+              fi
+            fi
+          done
+          if [ ${#DOWNLOADED_FILES[@]} -eq 0 ]; then
+            echo "❌ No files were successfully downloaded!"
+            exit 1
+          fi
+          DOWNLOADED_PATHS=$(printf "%s," "${DOWNLOADED_FILES[@]}")
+          echo "downloaded_files=${DOWNLOADED_PATHS%,}" >> $GITHUB_OUTPUT
+
+      - name: Convert videos
+        run: |
+          echo "🚀 Starting video conversion..."
+          ARGS=()
+          ARGS+=("${{ steps.download.outputs.downloaded_files }}")
+          ARGS+=("--output-dir" "${{ github.event.inputs.output_directory }}")
+          ARGS+=("--codec" "${{ github.event.inputs.codec }}")
+          ARGS+=("--preset" "${{ github.event.inputs.preset }}")
+          ARGS+=("--quality-mode" "${{ github.event.inputs.quality_mode }}")
+          ARGS+=("--crf" "${{ github.event.inputs.crf_value }}")
+
+          if [ "${{ github.event.inputs.use_original_settings }}" = "false" ]; then
+            echo "🔧 Using custom bitrate and resolution settings."
+            ARGS+=("--bitrate" "${{ github.event.inputs.bitrate }}")
+            ARGS+=("--resolution" "${{ github.event.inputs.resolution }}")
+          else
+            echo "✨ Using original bitrate and resolution."
+            ARGS+=("--resolution" "original")
+          fi
+          
+          if [ "${{ github.event.inputs.keep_audio }}" = "true" ]; then
+            ARGS+=("--keep-audio")
+          fi
+          
+          if [ "${{ github.event.inputs.use_two_pass }}" = "true" ]; then
+            ARGS+=("--two-pass")
+          fi
+          
+          ./video_converter.py "${ARGS[@]}"
+
+      - name: Display conversion results and Upload Artifact
+        if: always()
+        run: |
+          echo "📊 Conversion Results:"
+          ls -laR ${{ github.event.inputs.output_directory }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-videos-${{ github.run_id }}
+          path: ${{ github.event.inputs.output_directory }}
+          retention-days: 7
