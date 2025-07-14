@@ -24,30 +24,6 @@ on:
         description: 'Output height (e.g., 480, 720, 1080). Used if use_original_settings is false.'
         required: false
         default: '720'
-      codec:
-        description: 'Video codec to use'
-        required: true
-        default: 'libx265'
-        type: choice
-        options:
-          - libx265
-          - libx264
-          - libvvenc
-      preset:
-        description: 'Encoding preset (affects speed vs quality)'
-        required: true
-        default: 'slow'
-        type: choice
-        options:
-          - ultrafast
-          - superfast
-          - veryfast
-          - faster
-          - fast
-          - medium
-          - slow
-          - slower
-          - veryslow
       keep_audio:
         description: 'Keep audio in output'
         required: true
@@ -116,7 +92,7 @@ jobs:
               def __init__(self):
                   self.supported_formats = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.m4v']
                   self.conversion_stats = []
-              
+          
               def check_ffmpeg(self):
                   try:
                       subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, text=True)
@@ -124,7 +100,7 @@ jobs:
                       return True
                   except (subprocess.CalledProcessError, FileNotFoundError):
                       return False
-              
+          
               def get_file_size(self, filepath):
                   size = os.path.getsize(filepath)
                   for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -132,7 +108,7 @@ jobs:
                           return f"{size:.1f} {unit}"
                       size /= 1024.0
                   return f"{size:.1f} {unit}"
-              
+          
               def get_video_info(self, filepath):
                   try:
                       cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filepath]
@@ -140,7 +116,7 @@ jobs:
                       return json.loads(result.stdout)
                   except:
                       return None
-              
+          
               def expand_file_patterns(self, patterns):
                   files = []
                   for pattern in patterns:
@@ -150,7 +126,7 @@ jobs:
                   
                   valid_files = [f for f in list(set(files)) if os.path.exists(f) and Path(f).suffix.lower() in self.supported_formats]
                   return valid_files
-              
+          
               def build_ffmpeg_command(self, input_file, output_file, config, pass_num=None):
                   cmd = ['ffmpeg', '-i', input_file]
                   cmd.extend(['-c:v', config['codec']])
@@ -192,7 +168,8 @@ jobs:
               
               def convert_video(self, input_file, output_dir, config):
                   input_path = Path(input_file)
-                  codec_suffix = {'libx264': 'h264', 'libx265': 'h265', 'libvvenc': 'h266'}.get(config['codec'], 'converted')
+                  # Codec suffix is now fixed to h265 as the codec is fixed to libx265
+                  codec_suffix = 'h265'
                   
                   res_suffix = f"_{config['resolution']}p" if config['resolution'] and config['resolution'] != 'original' else ""
                   output_filename = f"{input_path.stem}_{codec_suffix}{res_suffix}{input_path.suffix}"
@@ -249,9 +226,8 @@ jobs:
               parser = argparse.ArgumentParser(description='Advanced Video Converter')
               parser.add_argument('input_files', help='Input files or patterns')
               parser.add_argument('--output-dir', required=True)
-              parser.add_argument('--codec', default='libx265')
+              # Codec and preset are now hardcoded in the workflow and thus not exposed here as CLI args
               parser.add_argument('--bitrate', default=None, help='Omit to use original')
-              parser.add_argument('--preset', default='slow')
               parser.add_argument('--resolution', default='original', help="'original' or a height value")
               parser.add_argument('--keep-audio', action='store_true')
               parser.add_argument('--two-pass', action='store_true')
@@ -269,7 +245,10 @@ jobs:
               if not input_files:
                   sys.exit("❌ No valid input files found!")
               
+              # Hardcode codec and preset here for the script's internal config
               config = vars(args)
+              config['codec'] = 'libx265' # Hardcoded
+              config['preset'] = 'veryslow' # Hardcoded
               
               for i, f in enumerate(input_files, 1):
                   print(f"\n--- Processing {i}/{len(input_files)}: {os.path.basename(f)} ---")
@@ -323,8 +302,10 @@ jobs:
           ARGS=()
           ARGS+=("${{ steps.download.outputs.downloaded_files }}")
           ARGS+=("--output-dir" "${{ github.event.inputs.output_directory }}")
-          ARGS+=("--codec" "${{ github.event.inputs.codec }}")
-          ARGS+=("--preset" "${{ github.event.inputs.preset }}")
+          # Hardcode codec and preset here as they are no longer inputs
+          # The Python script's main() function will now set these internally
+          # ARGS+=("--codec" "libx265") # No longer needed as Python script sets it
+          # ARGS+=("--preset" "veryslow") # No longer needed as Python script sets it
           ARGS+=("--quality-mode" "${{ github.event.inputs.quality_mode }}")
           ARGS+=("--crf" "${{ github.event.inputs.crf_value }}")
 
