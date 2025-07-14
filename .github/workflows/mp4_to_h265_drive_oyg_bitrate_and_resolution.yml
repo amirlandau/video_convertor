@@ -319,21 +319,19 @@ jobs:
           fi
           
           if [ "${{ github.event.inputs.use_two_pass }}" = "true" ]; then
-            ARGS+=("--two-pass")
+            ARGS+=("--two-pass") 
           fi
           
           ./video_converter.py "${ARGS[@]}"
 
-      # Separate step for displaying results
       - name: Display conversion results
         if: always()
         run: |
           echo "📊 Conversion Results:"
           ls -laR ${{ github.event.inputs.output_directory }}
 
-      # Separate step for uploading artifact
       - name: Upload Converted Videos Artifact
-        if: always() # Ensure artifact is uploaded even if previous steps fail
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: converted-videos-${{ github.run_id }}
