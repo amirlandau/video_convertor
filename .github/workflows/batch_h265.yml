@@ -1,0 +1,68 @@
+# Name of the workflow, which will be displayed in the Actions tab of your GitHub repository.
+name: Convert Videos from Google Drive
+
+# --- Workflow Triggers ---
+# This section defines when the workflow will run.
+on:
+  # 1. Allows you to run this workflow manually from the Actions tab.
+  # This is useful for on-demand conversions without needing to push code.
+  workflow_dispatch:
+
+  # 2. Triggers the workflow automatically on push events to the 'main' branch.
+  push:
+    branches:
+      - main
+
+# --- Jobs ---
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel.
+jobs:
+  # This workflow contains a single job called "build-and-convert".
+  build-and-convert:
+    # The type of virtual machine to run the job on. 'ubuntu-latest' is a standard, cost-effective choice.
+    runs-on: ubuntu-latest
+
+    # --- Steps ---
+    # A job contains a sequence of tasks called steps. Steps can run commands or use actions.
+    steps:
+      # Step 1: Checks out your repository's code into the runner.
+      # This is necessary to access your Python script and requirements.txt file.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Install FFmpeg on the Ubuntu runner.
+      # The base runner image does not include FFmpeg, so it must be installed manually.
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      # Step 3: Set up the Python environment.
+      # This action installs a specific version of Python onto the runner.
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # Step 4: Install Python dependencies.
+      # This step upgrades pip and then installs the packages listed in your requirements.txt file (e.g., gdown).
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else echo "requirements.txt not found, skipping pip install."; fi
+
+      # Step 5: Run the main Python script.
+      # This executes your script which handles the downloading from Google Drive and the video conversion.
+      # Make sure your script is named 'convert_videos.py' or update the filename here.
+      - name: Run video download and conversion script
+        run: python convert_videos.py
+
+      # Step 6: Upload the results as a workflow artifact.
+      # This action bundles the specified directory into a .zip file and uploads it to the workflow run.
+      # You can download this artifact from the summary page of the workflow run.
+      - name: Upload converted videos artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # The name of the downloadable artifact file (will be 'converted-videos.zip').
+          name: converted-videos
+          # The path to the directory to upload. This must match the output directory in your Python script.
+          path: converted_videos/
